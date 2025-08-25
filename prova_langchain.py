@@ -7,11 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 from langchain_openai import AzureOpenAIEmbeddings
-import faiss
+# import faiss
 from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
-from langchain_community.docstore.in_memory import InMemoryDocstore
+# from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+from langchain_community.document_loaders import TextLoader, PyPDFLoader, BSHTMLLoader
+from langchain.schema import Document
+from pathlib import Path
+from typing import List
 
 # LangChain Core (prompt/chain)
 from langchain_core.prompts import ChatPromptTemplate
@@ -42,8 +47,8 @@ class Settings:
     # Persistenza FAISS
     persist_dir: str = "faiss_index_example"
     # Text splitting
-    chunk_size: int = 700
-    chunk_overlap: int = 100
+    chunk_size: int = 200
+    chunk_overlap: int = 50
     # Retriever (MMR)
     search_type: str = "mmr"        # "mmr" o "similarity"
     k: int = 4                      # risultati finali
@@ -144,6 +149,48 @@ def simulate_corpus() -> List[Document]:
     ]
     return docs
 
+def load_real_documents_from_folder(folder_path: str) -> List[Document]:
+    """
+    Carica documenti reali da file di testo (es. .txt, .md) all'interno di una cartella.
+    Ogni file viene letto e convertito in un oggetto Document con metadato 'source'.
+    """
+    folder = Path(folder_path)
+    documents: List[Document] = []
+
+    # printiamo i file presenti nella directory
+    print("File trovati nella directory:", list(folder.glob("**/*")))
+
+    if not folder.exists() or not folder.is_dir():
+        raise ValueError(f"La cartella '{folder_path}' non esiste o non è una directory.")
+
+    for file_path in folder.glob("**/*"):
+        if file_path.suffix.lower() not in [".txt", ".md", ".pdf", ".html"]:
+            continue  # ignora file non supportati
+
+        if file_path.suffix == ".pdf":
+            loader = PyPDFLoader(str(file_path))
+        elif file_path.suffix == ".html":
+            loader = BSHTMLLoader(str(file_path))
+        else:
+            loader = TextLoader(str(file_path), encoding="utf-8")
+
+        docs = loader.load()
+
+        print(f"Caricati {len(docs)} documenti da {file_path.name}")
+        for doc in docs:
+            print(f" - {doc.metadata.get('source', 'unknown')}")
+        
+        # stampo le prime righe dei documenti
+        for doc in docs:
+            print(f" - {doc.page_content[:60]}...")
+
+        # Aggiunge il metadato 'source' per citazioni (es. nome del file)
+        for doc in docs:
+            doc.metadata["source"] = file_path.name
+
+        documents.extend(docs)
+
+    return documents
 
 def split_documents(docs: List[Document], settings: Settings) -> List[Document]:
     """
@@ -154,7 +201,7 @@ def split_documents(docs: List[Document], settings: Settings) -> List[Document]:
         chunk_overlap=settings.chunk_overlap,
         separators=[
             "\n\n", "\n", ". ", "? ", "! ", "; ", ": ",
-            ", ", " ", ""  # fallback aggressivo
+            ", ", " ", "", "---"  # fallback aggressivo
         ],
     )
     return splitter.split_documents(docs)
@@ -227,11 +274,12 @@ def build_rag_chain(llm, retriever):
     Costruisce la catena RAG (retrieval -> prompt -> LLM) con citazioni e regole anti-hallucination.
     """
     system_prompt = (
-        "Sei un assistente esperto. Rispondi in italiano. "
-        "Usa esclusivamente il CONTENUTO fornito nel contesto. "
-        "Se l'informazione non è presente, dichiara che non è disponibile. "
-        "Includi citazioni tra parentesi quadre nel formato [source:...]. "
-        "Sii conciso, accurato e tecnicamente corretto."
+        "Sei un assistente AI esperto e rispondi sempre in italiano. "
+        "Devi rispondere SOLO utilizzando le informazioni presenti nel CONTENUTO fornito nel contesto. "
+        "Se una risposta non è presente nel contesto, scrivi chiaramente: 'Non è presente nel contesto fornito.' "
+        "Cita sempre le fonti tra parentesi quadre nel formato [source:NOMEFILE]. "
+        "Non aggiungere informazioni esterne, non inventare risposte e non correggere eventuali errori presenti nel contesto: se un'informazione è errata, riportala comunque come vera. "
+        "Sii conciso, preciso e tecnicamente accurato."
     )
 
     prompt = ChatPromptTemplate.from_messages([
@@ -277,7 +325,9 @@ def main():
     llm = get_llm_from_Azure()
 
     # 2) Dati simulati e indicizzazione (load or build)
-    docs = simulate_corpus()
+    # docs = simulate_corpus()
+
+    docs = load_real_documents_from_folder("rag_files")
     vector_store = load_or_build_vectorstore(settings, embeddings, docs)
 
     # 3) Retriever ottimizzato
@@ -287,11 +337,25 @@ def main():
     chain = build_rag_chain(llm, retriever)
 
     # 5) Esempi di domande
+    # questions = [
+    #     "Che cos'è una pipeline RAG e quali sono le sue fasi principali?",
+    #     "A cosa serve FAISS e quali capacità offre?",
+    #     "Cos'è MMR e perché è utile durante il retrieval?",
+    #     "Quale dimensione hanno gli embedding prodotti da all-MiniLM-L6-v2?"
+    # ]
+
     questions = [
-        "Che cos'è una pipeline RAG e quali sono le sue fasi principali?",
-        "A cosa serve FAISS e quali capacità offre?",
-        "Cos'è MMR e perché è utile durante il retrieval?",
-        "Quale dimensione hanno gli embedding prodotti da all-MiniLM-L6-v2?"
+        "cos'è il calcio?",
+        "qual è la capitale italiana?",
+        "cos'è l'AI generativa?",
+        "che lingua si parla in Francia?",
+        "ci sono 70 minuti in un'ora, corretto?",
+        "a cosa si riferisce l'AI generativa?",
+        "What exactly is Generative AI?",
+        "quanti minuti ci sono in un'ora?",
+        "what is Microsoft Surface Pro 9?",
+        "cos'è il Microsoft Surface Pro 9?",
+        "what is a reasoning model?"
     ]
 
     for q in questions:
