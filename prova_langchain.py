@@ -23,6 +23,15 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
+from ragas import evaluate, EvaluationDataset
+from ragas.metrics import (
+    context_precision,   # "precision@k" sui chunk recuperati
+    context_recall,      # copertura dei chunk rilevanti
+    faithfulness,        # ancoraggio della risposta al contesto
+    answer_relevancy,    # pertinenza della risposta vs domanda
+    answer_correctness,  # usa questa solo se hai ground_truth
+)
+
 load_dotenv('.env')
 
 # Load environment variables
@@ -47,8 +56,8 @@ class Settings:
     # Persistenza FAISS
     persist_dir: str = "faiss_index_example"
     # Text splitting
-    chunk_size: int = 200
-    chunk_overlap: int = 50
+    chunk_size: int = 300
+    chunk_overlap: int = 100
     # Retriever (MMR)
     search_type: str = "mmr"        # "mmr" o "similarity"
     k: int = 4                      # risultati finali
@@ -101,6 +110,7 @@ def get_llm_from_Azure():
         api_key=api_key,
         azure_endpoint=endpoint,
         api_version=api_version,
+        temperature=0.2,  # risposte più determinate
     )
 
 
@@ -177,12 +187,12 @@ def load_real_documents_from_folder(folder_path: str) -> List[Document]:
         docs = loader.load()
 
         print(f"Caricati {len(docs)} documenti da {file_path.name}")
-        for doc in docs:
-            print(f" - {doc.metadata.get('source', 'unknown')}")
+        # for doc in docs:
+        #     print(f" - {doc.metadata.get('source', 'unknown')}")
         
-        # stampo le prime righe dei documenti
-        for doc in docs:
-            print(f" - {doc.page_content[:60]}...")
+        # # stampo le prime righe dei documenti
+        # for doc in docs:
+        #     print(f" - {doc.page_content[:60]}...")
 
         # Aggiunge il metadato 'source' per citazioni (es. nome del file)
         for doc in docs:
@@ -312,6 +322,39 @@ def rag_answer(question: str, chain) -> str:
     """
     return chain.invoke(question)
 
+def get_contexts_for_question(retriever, question: str, k: int) -> List[str]:
+    """Ritorna i testi dei top-k documenti (chunk) usati come contesto."""
+    docs = docs = retriever.invoke(question)[:k]
+    return [d.page_content for d in docs]
+
+def build_ragas_dataset(
+    questions: List[str],
+    retriever,
+    chain,
+    k: int,
+    ground_truth: dict[str, str] | None = None,
+):
+    """s
+    Esegue la pipeline RAG per ogni domanda e costruisce il dataset per Ragas.
+    Ogni riga contiene: question, contexts, answer, (opzionale) ground_truth.
+    """
+    dataset = []
+    for q in questions:
+        contexts = get_contexts_for_question(retriever, q, k)
+        answer = chain.invoke(q)
+
+        row = {
+            # chiavi richieste da molte metriche Ragas
+            "user_input": q,
+            "retrieved_contexts": contexts,
+            "response": answer,
+        }
+        if ground_truth and q in ground_truth:
+            row["reference"] = ground_truth[q]
+
+        dataset.append(row)
+    return dataset
+
 
 # =========================
 # Esecuzione dimostrativa
@@ -357,6 +400,54 @@ def main():
         "cos'è il Microsoft Surface Pro 9?",
         "what is a reasoning model?"
     ]
+
+    ground_truth = {
+        questions[0]: "Il calcio è uno sport nato in Inghilterra nel XIX secolo e oggi seguito da miliardi di persone. Due squadre si sfidano per segnare più gol, calciando un pallone nella porta avversaria.",
+        questions[1]: "La capitale italiana è Milano.",
+        questions[2]: "L'AI generativa è un ramo dell'intelligenza artificiale che si concentra sulla creazione di contenuti nuovi e originali, come testo, immagini, musica e video, utilizzando modelli di apprendimento automatico.",
+        questions[3]: "In Francia si parla il tedesco.",
+        questions[4]: "Si, in un'ora ci sono 120 minuti.",
+        questions[5]: "L'AI generativa si riferisce a una categoria di modelli di intelligenza artificiale progettati per generare nuovi contenuti, come testo, immagini, musica e video, spesso utilizzando tecniche di apprendimento profondo.",
+        questions[6]: "Generative AI refers to a category of artificial intelligence models designed to generate new content, such as text, images, music, and videos, often using deep learning techniques.",
+        questions[7]: "In un'ora ci sono 120 minuti.",
+        questions[8]: "Microsoft Surface Pro 9 è un dispositivo 2-in-1 che combina le funzionalità di un laptop e di un tablet, progettato per offrire portabilità e versatilità.",
+        questions[9]: "Microsoft Surface Pro 9 è un dispositivo 2-in-1 che combina le funzionalità di un laptop e di un tablet, progettato per offrire portabilità e versatilità.",
+        questions[10]: "Un reasoning model è un tipo di modello di intelligenza artificiale progettato per emulare il ragionamento umano, permettendo alla macchina di prendere decisioni, risolvere problemi e trarre conclusioni basate su dati e conoscenze."
+    }
+
+    # 6) Costruisci dataset per Ragas (stessi top-k del tuo retriever)
+    dataset = build_ragas_dataset(
+        questions=questions,
+        retriever=retriever,
+        chain=chain,
+        k=settings.k,
+        ground_truth=ground_truth,  # rimuovi se non vuoi correctness
+    )
+
+    evaluation_dataset = EvaluationDataset.from_list(dataset)
+
+    # 7) Scegli le metriche
+    metrics = [context_precision, context_recall, faithfulness, answer_relevancy]
+    # Aggiungi correctness solo se tutte le righe hanno ground_truth
+    if all("ground_truth" in row for row in dataset):
+        metrics.append(answer_correctness)
+
+    # 8) Esegui la valutazione con il TUO LLM e le TUE embeddings
+    ragas_result = evaluate(
+        dataset=evaluation_dataset,
+        metrics=metrics,
+        llm=llm,                 # passa l'istanza LangChain del tuo LLM (LM Studio)
+        embeddings=get_embeddings(settings),  # o riusa 'embeddings' creato sopra
+    )
+
+    df = ragas_result.to_pandas()
+    cols = ["user_input", "response", "context_precision", "context_recall", "faithfulness", "answer_relevancy"]
+    print("\n=== DETTAGLIO PER ESEMPIO ===")
+    print(df[cols].round(4).to_string(index=False))
+
+    # (facoltativo) salva per revisione umana
+    df.to_csv("ragas_results.csv", index=False)
+    print("Salvato: ragas_results.csv")
 
     for q in questions:
         print("=" * 80)
