@@ -51,8 +51,8 @@ class Settings:
     mmr_lambda: float = 0.3         # 0 = diversificazione massima, 1 = pertinenza massima
     # Embedding
     azure_embedding_model_name: str = embedding_model
-    # LM Studio (OpenAI-compatible)
-    lmstudio_model_env: str = deployment  # nome del modello in LM Studio, via env var
+    # # LM Studio (OpenAI-compatible)
+    # lmstudio_model_env: str = deployment  # nome del modello in LM Studio, via env var
 
 
 SETTINGS = Settings()
@@ -274,7 +274,7 @@ def main():
 
     # 1) Componenti
     embeddings = get_embeddings(settings)
-    llm = get_llm_from_Azure(settings)
+    llm = get_llm_from_Azure()
 
     # 2) Dati simulati e indicizzazione (load or build)
     docs = simulate_corpus()
