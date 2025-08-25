@@ -71,7 +71,7 @@ def get_embeddings(settings: Settings):
     )
 
 
-def get_llm_from_Azure(settings: Settings):
+def get_llm_from_Azure():
     """
     Inizializza un ChatModel puntando a Azure OpenAI.
     Richiede:
